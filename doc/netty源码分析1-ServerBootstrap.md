@@ -1,4 +1,4 @@
-# Netty 源码分析
+# Netty 源码分析 - ServerBootstrap
 
 ## 初始化
 
@@ -54,6 +54,23 @@ AbstractBootstrap.java
 ```
 
 #### channel
+
+NioServerSocketChannel 对 java.nio.ServerSocketChannel进行了封装。
+
+看一下其继承体系：
+
+```
+public class NioServerSocketChannel extends AbstractNioMessageChannel
+                             implements io.netty.channel.socket.ServerSocketChannel {}
+                             
+public abstract class AbstractNioMessageChannel extends AbstractNioChannel { }
+
+public abstract class AbstractNioChannel extends AbstractChannel {
+    private final SelectableChannel ch;
+    volatile SelectionKey selectionKey;
+    ...
+}
+```
 
 ```
 AbstractBootstrap.java
@@ -180,24 +197,18 @@ doBind() 方法负责具体的绑定服务端端口，监听请求操作
         }
 
         if (regFuture.isDone()) {
-            // At this point we know that the registration was complete and successful.
             ChannelPromise promise = channel.newPromise();
             doBind0(regFuture, channel, localAddress, promise);
             return promise;
         } else {
-            // Registration future is almost always fulfilled already, but just in case it's not.
             final PendingRegistrationPromise promise = new PendingRegistrationPromise(channel);
             regFuture.addListener(new ChannelFutureListener() {
                 @Override
                 public void operationComplete(ChannelFuture future) throws Exception {
                     Throwable cause = future.cause();
                     if (cause != null) {
-                        // Registration on the EventLoop failed so fail the ChannelPromise directly to not cause an
-                        // IllegalStateException once we try to access the EventLoop of the Channel.
                         promise.setFailure(cause);
                     } else {
-                        // Registration was successful, so set the correct executor to use.
-                        // See https://github.com/netty/netty/issues/2586
                         promise.executor = channel.eventLoop();
                     }
                     doBind0(regFuture, channel, localAddress, promise);
@@ -439,4 +450,60 @@ AbstractNioChannel.java
         config = new NioServerSocketChannelConfig(this, javaChannel().socket());
     }
 ```
+
+#### bind
+
+```
+        public void bind(
+                ChannelHandlerContext ctx, SocketAddress localAddress, ChannelPromise promise)
+                throws Exception {
+            unsafe.bind(localAddress, promise);
+        }
+
+```
+
+```
+        public final void bind(final SocketAddress localAddress, final ChannelPromise promise) {
+            if (!promise.setUncancellable() || !ensureOpen(promise)) {
+                return;
+            }
+
+            if (Boolean.TRUE.equals(config().getOption(ChannelOption.SO_BROADCAST)) &&
+                localAddress instanceof InetSocketAddress &&
+                !((InetSocketAddress) localAddress).getAddress().isAnyLocalAddress() &&
+                !PlatformDependent.isWindows() && !PlatformDependent.isRoot()) {
+                logger.warn();
+            }
+
+            boolean wasActive = isActive();
+            try {
+                doBind(localAddress);
+            } catch (Throwable t) {
+                safeSetFailure(promise, t);
+                closeIfClosed();
+                return;
+            }
+
+            if (!wasActive && isActive()) {
+                invokeLater(new OneTimeTask() {
+                    @Override
+                    public void run() {
+                        pipeline.fireChannelActive();
+                    }
+                });
+            }
+
+            safeSetSuccess(promise);
+        }
+```
+
+```
+//NioServerSocketChannel.java
+
+    protected void doBind(SocketAddress localAddress) throws Exception {
+        javaChannel().socket().bind(localAddress, config.getBacklog());
+    }
+```
+
+
 
